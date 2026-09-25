@@ -325,7 +325,10 @@ for c in \
   $'cat <<\'EOF\' | ssh prod \'sudo bash -s\'\nsystemctl restart nginx\nEOF' \
   $'timeout 120 ssh prod \'bash -s\' <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
   $'sudo -iu root bash <<\'EOF\'\nsystemctl restart nginx\nEOF' \
-  $'git commit -q -m "$(cat <<\'EOF\'\nfix: x\nEOF\n)" && ssh prod \'cd /opt/app && git pull\''; do
+  $'git commit -q -m "$(cat <<\'EOF\'\nfix: x\nEOF\n)" && ssh prod \'cd /opt/app && git pull\'' \
+  $'/usr/bin/ssh prod <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'expect <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'bash -c "$(cat <<\'EOF\'\nsystemctl restart nginx\nEOF\n)"'; do
   n=$((n+1)); mk "$TMP/hdrw$n.jsonl" "Bash:$c"
   check block "тело — команды или запись: ${c:0:45}" "$TMP/hdrw$n.jsonl"
 done
@@ -335,7 +338,13 @@ for c in \
   $'MSG=$(cat <<\'EOF\'\nfix: systemctl restart nginx\nEOF\n)' \
   $'cat > /tmp/fix.sh <<\\EOF\nsudo systemctl restart nginx\nEOF' \
   $'ssh prod \'bash -s\' <<\'OUTER\'\ncat > /tmp/note <<\'EOF\'\nsystemctl restart nginx\nEOF\nOUTER' \
-  $'bash ./configure-answers.sh <<\'EOF\'\nsudo systemctl restart nginx\nEOF'; do
+  $'bash ./configure-answers.sh <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'ssh prod \'cat > /tmp/note.txt\' <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'ssh prod "sudo -u postgres psql app" <<\'SQL\'\n-- systemctl restart nginx\nSELECT 1;\nSQL' \
+  $'jq -r \'.[] | .name\' <<\'EOF\'\n[{"name":"sudo systemctl restart nginx"}]\nEOF' \
+  $'docker compose exec -T db psql -U app <<\'SQL\'\n-- systemctl restart nginx\nSQL' \
+  $'gh pr create --title "fix(hooks): x" \\\n  --body-file - <<\'EOF\'\n- ufw default deny incoming\nEOF' \
+  $'PYTHONIOENCODING=utf-8 python - "$(cygpath -m x.py)" <<\'PYEOF\'\nprint("mv /etc/x /root/y")\nPYEOF'; do
   n=$((n+1)); mk "$TMP/hdro2$n.jsonl" "Bash:$c"
   check pass "тело — данные (формы проверки): ${c:0:40}" "$TMP/hdro2$n.jsonl"
 done

@@ -39,7 +39,10 @@
 #     переданные удалённому shell через echo (`echo "cp …" | ssh h bash`), `docker cp` в
 #     контейнер (это не сервер) — сознательно вне охвата;
 #   - слово-литерал внутри программы (`awk '$1=="crontab"'`) считается вызовом — цена правила 4;
-#   - скрытый файл в /root считается настройкой, даже если это выгрузка (`nginx -T > /root/.x`).
+#   - скрытый файл в /root считается настройкой, даже если это выгрузка (`nginx -T > /root/.x`);
+#   - «записал, потом выполнил»: скрипт в файле или переменной, выполненный на сервере
+#     (`ssh h 'bash -s' < fix.sh`, `ssh h "$SCRIPT"`, `ssh h 'sudo bash /tmp/fix.sh'`), и код
+#     python, который сам ходит на сервер (subprocess, paramiko) — содержимого замок не знает.
 # Проверено двумя раундами независимой проверки 25.09.2026: расписание (343 случая) и запись
 # в настройки сервера (370 случаев, четыре атакующих и перепроверщика).
 #
@@ -548,18 +551,29 @@ def razbit(cmd):
 # Тело heredoc — это ВХОД программы, а не команды: текст сообщения `git commit -F - <<EOF`,
 # содержимое файла `cat > run.sh <<EOF`, код `python - <<EOF`. Разбирать его как команды —
 # значит останавливать ход на тексте коммита, где упомянуты `ufw default` или `git pull`
-# (ложные остановки 25.09.2026 в самой сессии правки замка). Командами тело бывает, если его
-# читает оболочка: в логической строке есть ssh/sshpass/plink (в любом месте: `timeout 120 ssh`,
-# `cat <<EOF | ssh h 'bash -s'`, `for h …; do ssh $h`), оболочка без файла-скрипта (`bash`,
-# `bash -s`, `sudo -iu root bash`, `env X=1 sh`), `sudo -s`/`-i`, `su`, `at`. Содержимое кавычек
-# при этом не в счёт: `gh pr create --title "fix(ssh)" --body-file - <<EOF` — данные.
+# (ложные остановки 25.09.2026 в самой сессии правки замка).
+# Тело выкидывается из разбора, ТОЛЬКО если его читает известная программа-читатель данных
+# (CHITATELI_DANNYH: cat, git, gh, python, psql, jq, read, `while … done` …) и в логической
+# строке нет оболочки, которая получит его как команды: ssh/sshpass/plink в любом месте
+# (`timeout 120 ssh`, `cat <<EOF | ssh h 'bash -s'`, `for h …; do ssh $h`), оболочка без
+# файла-скрипта (`bash`, `bash -s`, `sudo -iu root bash`, `bash -c "$(cat <<EOF …)"`),
+# `sudo -s`/`-i`, `su`, `at`. Незнакомый читатель (`expect`, `runuser`, `docker exec … sh`) —
+# тело разбирается как команды, как раньше: для дисциплинарного замка шум дешевле дыры.
 # Оператор `<<` ищется только вне кавычек-данных и вне комментария (`grep "<<'PY'" файл`,
-# `# см. cat <<EOF` — не heredoc); тело начинается после конца ЛОГИЧЕСКОЙ строки (перенос `\`);
-# `<<\EOF` — тоже метка; вложенные тела разбираются рекурсивно; нет закрывающей метки — ничего
-# не выкидываем. Первая версия (только первое слово команды, без кавычек) дала 21 регрессию на
-# независимой проверке 25.09.2026. Сама запись в первой строке (`cat > /etc/x <<EOF`) ловится
-# как раньше.
+# `# см. cat <<EOF` — не heredoc); тело начинается после конца ЛОГИЧЕСКОЙ строки (перенос
+# `\`); `<<\EOF` — тоже метка; вложенные тела разбираются рекурсивно; нет закрывающей метки —
+# ничего не выкидываем; `"$(cat <<EOF … EOF)" && ssh …` — строка после метки приклеивается
+# к команде. Первая версия (по первому слову команды, умолчание «не узнал — выкинуть») дала
+# 21 регрессию на независимой проверке 25.09.2026. Сама запись в первой строке
+# (`cat > /etc/x <<EOF`) ловится как раньше.
 HEREDOC_OP = re.compile(r"<<(-?)\s*\\?(['\"]?)([A-Za-z_][\w.-]*)\2")
+OBOLOCHKA = r"(?:/\S*/)?(bash|sh|zsh|dash|ksh|ash)"
+CHITATELI_DANNYH = {"cat", "tee", "git", "gh", "glab", "python", "python3", "py", "node", "deno", "perl", "ruby",
+                    "php", "psql", "mysql", "mariadb", "sqlite3", "jq", "yq", "awk", "gawk", "sed", "mail", "mailx",
+                    "sendmail", "msmtp", "curl", "wc", "sort", "uniq", "grep", "head", "tail", "read", ":", "done",
+                    "base64", "xxd", "iconv", "column", "cut", "tr", "envsubst", "true", "less", "more"}
+OBERTKI_KOMANDY = {"sudo", "doas", "env", "nohup", "nice", "ionice", "exec", "time", "command", "builtin", "!",
+                   "xargs", "stdbuf", "setsid"}
 
 def _heredoc_operatory(s, stek):
     """Операторы heredoc в строке вне кавычек-данных и вне комментария. `stek` — контексты
@@ -607,11 +621,33 @@ def _heredoc_operatory(s, stek):
         i += 1
     return ops
 
+ZAKRYTYE_KAVYCHKI = re.compile(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"")
+SSH_SLOVO = re.compile(r"(?<![\w.-])(?:/\S*/)?(ssh|plink)(?=\s|$)")
+SSH_FLAG_ZNACH = {"-o", "-i", "-p", "-l", "-F", "-J", "-L", "-R", "-D", "-E", "-c", "-m", "-b", "-W", "-P", "-pw"}
+
+def _udalyonnaya(tekst, konec):
+    """Удалённая команда ssh/plink, начинающегося в `konec`: всё после флагов и хоста до `<<`."""
+    slova, k = re.split(r"<<", tekst[konec:], maxsplit=1)[0].split(), 0
+    while k < len(slova) and slova[k].startswith("-"):
+        k += 2 if slova[k] in SSH_FLAG_ZNACH else 1
+    ost = " ".join(w for w in slova[k + 1:] if not re.fullmatch(r"\d*(>>?|<|&>>?)&?\d*\S*", w))
+    return ost.strip().strip("'\"").strip()
+
 def _telo_chitaet_obolochka(tekst):
-    t = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " ", tekst)   # содержимое закрытых кавычек — данные
-    if re.search(r"(?<![\w./-])(ssh|sshpass|plink)(?=\s|$)", t):
-        return True
-    for m in re.finditer(r"(?<![\w./-])(?:/\S*/)?(bash|sh|zsh|dash|ksh)(?=\s|$|[;|&)])", t):
+    if re.search(r"(?<![\w./-])" + OBOLOCHKA + r"\s+(-\S+\s+)*-\w*c\s+[\"']?\$\(", tekst):
+        return True                                     # `bash -c "$(cat <<EOF …)"` — тело станет скриптом
+    # ssh/plink: тело уходит удалённой команде. Нет её (`ssh h <<EOF`), это оболочка или внутри
+    # подстановка — команды; удалённый читатель данных (`ssh h 'cat > x'`, `ssh h psql`,
+    # `ssh h python3 -`) — данные; незнакомый — команды.
+    for m in SSH_SLOVO.finditer(ZAKRYTYE_KAVYCHKI.sub(lambda q: "Q" * len(q.group(0)), tekst)):
+        udal = _udalyonnaya(tekst, m.end())
+        if not udal or "$(" in udal or _telo_chitaet_obolochka(udal):
+            return True
+        chitatel = _chitatel(udal)
+        if chitatel not in CHITATELI_DANNYH and not re.fullmatch(OBOLOCHKA, chitatel):
+            return True
+    t = ZAKRYTYE_KAVYCHKI.sub(" ", tekst)               # содержимое закрытых кавычек — данные
+    for m in re.finditer(r"(?<![\w./-])" + OBOLOCHKA + r"(?=\s|$|[;|&)])", t):
         toks = re.split(r"<<|[|;&)]", t[m.end():], maxsplit=1)[0].split()
         if "-c" in toks:
             continue                                    # тело — вход скрипта из -c
@@ -620,6 +656,41 @@ def _telo_chitaet_obolochka(tekst):
     if re.search(r"(?<![\w./-])(sudo|doas)(\s+-\S+)+\s*(<<|$)", t):
         return True                                     # `sudo -s <<EOF`, `sudo -i <<EOF`
     return bool(re.search(r"(?<![\w./-])(su|at|batch)(?=\s|$)", t))
+
+def _chitatel(pered):
+    """Программа, которой достаётся тело: последняя команда перед `<<` без обёрток."""
+    pered = ZAKRYTYE_KAVYCHKI.sub("Q", pered.replace("\\\n", " "))   # `(`, `|` в кавычках — не границы
+    while True:                                         # закрытые `$(…)` и `…` — одно слово, не граница
+        svernuto = re.sub(r"\$\([^()]*\)|`[^`]*`", "SUBST", pered)
+        if svernuto == pered:
+            break
+        pered = svernuto
+    kusok = re.split(r"\$\(|\|\||&&|[;|(`]|\b(?:do|then|else)\b", pered)[-1]
+    slova, k = kusok.split(), 0
+    while k < len(slova):
+        w = slova[k].strip("'\"")
+        if w in ("-u", "-g", "-C", "timeout"):
+            k += 2
+            continue
+        if w in OBERTKI_KOMANDY or w.startswith("-") or re.fullmatch(r"\w+=\S*", w) or not w:
+            k += 1
+            continue
+        imya = w.rsplit("/", 1)[-1]
+        if imya in ("docker", "podman", "kubectl"):     # `docker compose exec -T db psql` — читатель psql
+            vnutri = [x.rsplit("/", 1)[-1] for x in slova[k + 1:]]
+            return next((x for x in vnutri if x in CHITATELI_DANNYH), imya)
+        return imya
+    return ""
+
+def _telo_komandy(tekst, pered):
+    if _telo_chitaet_obolochka(tekst):
+        return True
+    chitatel = _chitatel(pered)
+    if chitatel in CHITATELI_DANNYH or chitatel in ("ssh", "plink", "sshpass"):
+        return False                                    # для ssh удалённую команду уже разобрали выше
+    if re.fullmatch(OBOLOCHKA, chitatel):
+        return False                                    # `bash script.sh <<EOF` — тело: вход скрипта
+    return True                                         # незнакомый читатель — разбираем, как раньше
 
 def bez_tel_heredoc(cmd):
     stroki, out, i, stek, logich, ozhidayut, prikleit = cmd.split("\n"), [], 0, [], [], [], False
@@ -632,24 +703,25 @@ def bez_tel_heredoc(cmd):
             out.append(s)
         prikleit = False
         logich.append(s)
-        ozhidayut.extend(_heredoc_operatory(s, stek))
+        ozhidayut.extend((len(logich) - 1, m) for m in _heredoc_operatory(s, stek))
         if (len(s) - len(s.rstrip("\\"))) % 2 == 1 and not (stek and stek[-1] == "'"):
             continue                                    # перенос `\` — логическая строка продолжается
         if ozhidayut:
             tekst = "\n".join(logich)
-            for m in ozhidayut:
+            for nomer, m in ozhidayut:
+                pered = "\n".join(logich[:nomer] + [logich[nomer][:m.start()]])
                 tabs, konec = m.group(1) == "-", m.group(3)
                 j, telo, najdeno = i, [], False
                 while j < len(stroki):
                     stroka = stroki[j]
                     j += 1
-                    if (stroka.lstrip("\t") if tabs else stroka) == konec:
-                        najdeno = True
+                    if (stroka.lstrip("\t") if tabs else stroka) in (konec, konec + ")", konec + ')"'):
+                        najdeno = True                  # `EOF)` bash тоже принимает как конец внутри $( )
                         break
                     telo.append(stroka)
                 if not najdeno:
                     break                               # нет закрывающей метки — ничего не выкидываем
-                if _telo_chitaet_obolochka(tekst):
+                if _telo_komandy(tekst, pered):
                     out.extend(bez_tel_heredoc("\n".join(telo)).split("\n"))   # команды; вложенные тела — тоже
                     out.append("")                      # граница: тело закончилось
                 else:
