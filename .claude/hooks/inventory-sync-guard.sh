@@ -28,7 +28,8 @@
 # sed -i, dd, tar -x, curl -o… — в /etc, /opt, /srv, /var/www, /usr/local, юниты systemd,
 # скрытые файлы root и пользователей, а `.env` и compose — в любом серверном каталоге.
 # НЕ правка: запись в /tmp, /var/lib, /var/log и на свой компьютер; копия-страховка рядом с
-# оригиналом (кроме каталогов *-enabled/, откуда грузится всё); дампы и бэкапы в /opt/backups.
+# оригиналом (кроме каталогов *-enabled/, откуда грузится всё); дампы и бэкапы в /opt/backups;
+# тело heredoc, если его читает не оболочка (текст коммита, содержимое файла, код python).
 #
 # ГРАНИЦА — чего замок НЕ видит (не расширять до паралича, см. правило 4 свода замков):
 #   - путь в переменной или цикле: `cp x "$CRON_D/y"`, `for f in /etc/cron.d/*; do sed -i …`
@@ -544,8 +545,126 @@ def razbit(cmd):
     segs.append(("".join(buf), razd))
     return segs
 
+# Тело heredoc — это ВХОД программы, а не команды: текст сообщения `git commit -F - <<EOF`,
+# содержимое файла `cat > run.sh <<EOF`, код `python - <<EOF`. Разбирать его как команды —
+# значит останавливать ход на тексте коммита, где упомянуты `ufw default` или `git pull`
+# (ложные остановки 25.09.2026 в самой сессии правки замка). Командами тело бывает, если его
+# читает оболочка: в логической строке есть ssh/sshpass/plink (в любом месте: `timeout 120 ssh`,
+# `cat <<EOF | ssh h 'bash -s'`, `for h …; do ssh $h`), оболочка без файла-скрипта (`bash`,
+# `bash -s`, `sudo -iu root bash`, `env X=1 sh`), `sudo -s`/`-i`, `su`, `at`. Содержимое кавычек
+# при этом не в счёт: `gh pr create --title "fix(ssh)" --body-file - <<EOF` — данные.
+# Оператор `<<` ищется только вне кавычек-данных и вне комментария (`grep "<<'PY'" файл`,
+# `# см. cat <<EOF` — не heredoc); тело начинается после конца ЛОГИЧЕСКОЙ строки (перенос `\`);
+# `<<\EOF` — тоже метка; вложенные тела разбираются рекурсивно; нет закрывающей метки — ничего
+# не выкидываем. Первая версия (только первое слово команды, без кавычек) дала 21 регрессию на
+# независимой проверке 25.09.2026. Сама запись в первой строке (`cat > /etc/x <<EOF`) ловится
+# как раньше.
+HEREDOC_OP = re.compile(r"<<(-?)\s*\\?(['\"]?)([A-Za-z_][\w.-]*)\2")
+
+def _heredoc_operatory(s, stek):
+    """Операторы heredoc в строке вне кавычек-данных и вне комментария. `stek` — контексты
+    (' " $( ), переживает перевод строки: многострочные кавычки не теряются."""
+    ops, i, n = [], 0, len(s)
+    while i < n:
+        top = stek[-1] if stek else None
+        ch = s[i]
+        if top == "'":
+            if ch == "'":
+                stek.pop()
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if top == '"':
+            if ch == '"':
+                stek.pop()
+            elif s.startswith("$(", i):
+                stek.append("$(")
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "#" and (i == 0 or s[i - 1] in " \t;&|("):
+            break                                       # комментарий до конца строки
+        if ch in "'\"":
+            stek.append(ch)
+        elif s.startswith("$(", i):
+            stek.append("$(")
+            i += 2
+            continue
+        elif ch == ")" and top == "$(":
+            stek.pop()
+        elif s.startswith("<<<", i):
+            i += 3
+            continue
+        elif s.startswith("<<", i):
+            m = HEREDOC_OP.match(s, i)
+            if m:
+                ops.append(m)
+                i = m.end()
+                continue
+        i += 1
+    return ops
+
+def _telo_chitaet_obolochka(tekst):
+    t = re.sub(r"'[^']*'|\"(?:[^\"\\\\]|\\\\.)*\"", " ", tekst)   # содержимое закрытых кавычек — данные
+    if re.search(r"(?<![\w./-])(ssh|sshpass|plink)(?=\s|$)", t):
+        return True
+    for m in re.finditer(r"(?<![\w./-])(?:/\S*/)?(bash|sh|zsh|dash|ksh)(?=\s|$|[;|&)])", t):
+        toks = re.split(r"<<|[|;&)]", t[m.end():], maxsplit=1)[0].split()
+        if "-c" in toks:
+            continue                                    # тело — вход скрипта из -c
+        if "-s" in toks or not any(not x.startswith("-") for x in toks):
+            return True                                 # `bash`, `bash -s`, `sudo -iu root bash`
+    if re.search(r"(?<![\w./-])(sudo|doas)(\s+-\S+)+\s*(<<|$)", t):
+        return True                                     # `sudo -s <<EOF`, `sudo -i <<EOF`
+    return bool(re.search(r"(?<![\w./-])(su|at|batch)(?=\s|$)", t))
+
+def bez_tel_heredoc(cmd):
+    stroki, out, i, stek, logich, ozhidayut, prikleit = cmd.split("\n"), [], 0, [], [], [], False
+    while i < len(stroki):
+        s = stroki[i]
+        i += 1
+        if prikleit and out:
+            out[-1] += " " + s                          # `"$(cat <<EOF … EOF)" && ssh …` — команда продолжается
+        else:
+            out.append(s)
+        prikleit = False
+        logich.append(s)
+        ozhidayut.extend(_heredoc_operatory(s, stek))
+        if (len(s) - len(s.rstrip("\\"))) % 2 == 1 and not (stek and stek[-1] == "'"):
+            continue                                    # перенос `\` — логическая строка продолжается
+        if ozhidayut:
+            tekst = "\n".join(logich)
+            for m in ozhidayut:
+                tabs, konec = m.group(1) == "-", m.group(3)
+                j, telo, najdeno = i, [], False
+                while j < len(stroki):
+                    stroka = stroki[j]
+                    j += 1
+                    if (stroka.lstrip("\t") if tabs else stroka) == konec:
+                        najdeno = True
+                        break
+                    telo.append(stroka)
+                if not najdeno:
+                    break                               # нет закрывающей метки — ничего не выкидываем
+                if _telo_chitaet_obolochka(tekst):
+                    out.extend(bez_tel_heredoc("\n".join(telo)).split("\n"))   # команды; вложенные тела — тоже
+                    out.append("")                      # граница: тело закончилось
+                else:
+                    prikleit = bool(stek)               # внутри "$( … )": строка после метки — та же команда
+                    if not prikleit:
+                        out.append("")
+                i = j
+            ozhidayut = []
+        if not stek:
+            logich = []
+    return "\n".join(out)
+
 def changes_infra(cmd):
     """Ищет изменяющую команду посегментно, пропуская read-only обёртки."""
+    cmd = bez_tel_heredoc(cmd)                         # сначала: `\` в теле heredoc — не продолжение строки
     cmd = re.sub(r"\\\r?\n", " ", cmd)                 # продолжение строки обратной косой — как в bash
     cmd = re.sub(r"\|[ \t]*\r?\n\s*", "| ", cmd)       # канал, перенесённый на новую строку
     cwd = None

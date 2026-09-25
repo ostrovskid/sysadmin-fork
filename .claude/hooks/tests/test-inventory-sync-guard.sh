@@ -297,6 +297,49 @@ for c in \
   check pass "не правка: ${c:0:60}" "$TMP/r2ro$n.jsonl"
 done
 
+echo "[2е] Тело heredoc — данные, если его читает не оболочка (25.09.2026)"
+# Ложные остановки в самой сессии правки замка: текст коммита `git commit -F - <<EOF` с
+# упоминанием `ufw default` и `git pull` принимался за команды. Командами тело бывает, только
+# если его читает оболочка — ssh без команды, `bash -s`, `sudo -s`.
+n=0
+for c in \
+  $'git commit -q -F - <<\'EOF\'\nfix: ufw default deny, systemctl edit x, git pull в /opt/app\nsudo cp x /etc/nginx/nginx.conf\nEOF' \
+  $'cat > /tmp/notes.md <<\'EOF\'\nsudo systemctl restart nginx\necho X >> /opt/app/.env\nEOF' \
+  $'gh pr create --title x --body-file - <<\'EOF\'\n- ufw enable, hostnamectl set-hostname, useradd deploy\nEOF' \
+  $'cat > run.sh <<\'EOF\'\n#!/usr/bin/env bash\ndocker compose up -d\nEOF' \
+  $'python - <<\'PY\'\nprint("mv /etc/x /root/y")\nPY'; do
+  n=$((n+1)); mk "$TMP/hdro$n.jsonl" "Bash:$c"
+  check pass "тело — данные: ${c:0:50}" "$TMP/hdro$n.jsonl"
+done
+n=0
+for c in \
+  $'ssh prod-host <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'ssh prod-host \'bash -s\' <<\'EOF\'\nsudo cp /tmp/x.conf /etc/nginx/nginx.conf\nEOF' \
+  $'bash <<\'EOF\'\nsudo ufw default deny incoming\nEOF' \
+  $'ssh prod-host sudo -s <<\'EOF\'\necho X=1 >> /opt/app/.env\nEOF' \
+  $'sudo tee /etc/systemd/system/x.service > /dev/null <<\'EOF\'\n[Service]\nEOF' \
+  $'git commit -q -m x <<\'EOF\'\nтекст\nEOF\nsudo systemctl restart nginx' \
+  $'grep -n "<<\'PY\'" hook.sh\nssh prod \'sudo systemctl restart nginx\'' \
+  $'# запись через cat <<EOF, см. ниже\nssh prod \'sudo systemctl restart nginx\'' \
+  $'ssh -o ConnectTimeout=5 \\\n    root@prod <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'cat <<\'EOF\' | ssh prod \'sudo bash -s\'\nsystemctl restart nginx\nEOF' \
+  $'timeout 120 ssh prod \'bash -s\' <<\'EOF\'\nsudo systemctl restart nginx\nEOF' \
+  $'sudo -iu root bash <<\'EOF\'\nsystemctl restart nginx\nEOF' \
+  $'git commit -q -m "$(cat <<\'EOF\'\nfix: x\nEOF\n)" && ssh prod \'cd /opt/app && git pull\''; do
+  n=$((n+1)); mk "$TMP/hdrw$n.jsonl" "Bash:$c"
+  check block "тело — команды или запись: ${c:0:45}" "$TMP/hdrw$n.jsonl"
+done
+n=0
+for c in \
+  $'git commit -q \\\n  -F - <<\'EOF\'\nfix: ufw default deny\nEOF' \
+  $'MSG=$(cat <<\'EOF\'\nfix: systemctl restart nginx\nEOF\n)' \
+  $'cat > /tmp/fix.sh <<\\EOF\nsudo systemctl restart nginx\nEOF' \
+  $'ssh prod \'bash -s\' <<\'OUTER\'\ncat > /tmp/note <<\'EOF\'\nsystemctl restart nginx\nEOF\nOUTER' \
+  $'bash ./configure-answers.sh <<\'EOF\'\nsudo systemctl restart nginx\nEOF'; do
+  n=$((n+1)); mk "$TMP/hdro2$n.jsonl" "Bash:$c"
+  check pass "тело — данные (формы проверки): ${c:0:40}" "$TMP/hdro2$n.jsonl"
+done
+
 echo "[2] Изменение без обновления inventory — останавливаем"
 mk "$TMP/change1.jsonl" "Bash:ssh prod-host 'docker compose up -d academii'"
 check block "docker compose up" "$TMP/change1.jsonl"
