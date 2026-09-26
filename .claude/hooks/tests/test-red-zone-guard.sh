@@ -236,11 +236,11 @@ bad() { FAIL=$((FAIL+1)); printf '  ❌ %s\n' "$1"; }
 
 LOOP="$(sed -n '/^# ── НАЧАЛО РАЗБОРА СЕГМЕНТОВ/,/^# ── КОНЕЦ РАЗБОРА СЕГМЕНТОВ/p' "$HOOK" \
         | grep -v '^[[:space:]]*#' | sed 's/[[:space:]]#.*$//')"
-if [ -z "$LOOP" ] || ! printf '%s' "$LOOP" | grep -q 'RED_PATTERNS'; then
+if [ -z "$LOOP" ] || ! grep -q 'RED_PATTERNS' <<<"$LOOP"; then
   bad "цикл разбора сегментов не найден по маркерам — проверять нечего (контроль непустоты)"
-elif printf '%s' "$LOOP" | grep -Eq '\$\(|`|(^|[^|])\|[^|]|(^|[^a-z_])(grep|egrep|sed|awk|tr|cut|python3?|perl)([[:space:]]|$)'; then
+elif grep -Eq '\$\(|`|(^|[^|])\|[^|]|(^|[^a-z_])(grep|egrep|sed|awk|tr|cut|python3?|perl)([[:space:]]|$)' <<<"$LOOP"; then
   bad "в цикле по сегментам порождаются процессы — на Windows это десятки секунд:
-$(printf '%s' "$LOOP" | grep -En '\$\(|`|(^|[^|])\|[^|]|(^|[^a-z_])(grep|egrep|sed|awk|tr|cut|python3?|perl)([[:space:]]|$)' | head -3)"
+$(grep -En '\$\(|`|(^|[^|])\|[^|]|(^|[^a-z_])(grep|egrep|sed|awk|tr|cut|python3?|perl)([[:space:]]|$)' <<<"$LOOP" | head -3)"
 else
   ok "в цикле по сегментам ни одного порождённого процесса"
 fi
