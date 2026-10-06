@@ -8,7 +8,9 @@ set -uo pipefail
 # (Windows cp1252) она падает и подаёт хуку пустой вход — тест «проваливается» там,
 # где замок исправен. Правило 3д свода замков.
 export PYTHONIOENCODING=utf-8
-HOOK="$(cd "$(dirname "$0")/.." && pwd)/red-zone-guard.sh"
+# RED_GUARD_HOOK — другая версия замка (например, историческая из git): так тест
+# проверяется на дефекте, который должен ловить (персона §3.11).
+HOOK="${RED_GUARD_HOOK:-$(cd "$(dirname "$0")/.." && pwd)/red-zone-guard.sh}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
@@ -54,7 +56,7 @@ STALE="$TMP/stale.jsonl"
 RED_SAMPLE='docker volume rm pgdata-old'
 
 run() { # $1 = команда, $2 = transcript_path (может быть пустым)
-  python3 - "$1" "${2:-}" <<'PY' | env PYTHONIOENCODING="${HOOK_ENC:-utf-8}" RED_GUARD_BUDGET="${HOOK_BUDGET_ENV:-}" bash "$HOOK"
+  python3 - "$1" "${2:-}" <<'PY' | env PYTHONIOENCODING="${HOOK_ENC:-utf-8}" RED_GUARD_BUDGET="${HOOK_BUDGET_ENV:-}" PATH="${HOOK_PATH:-$PATH}" bash "$HOOK"
 import json, sys
 print(json.dumps({
   "session_id": "test-session",
@@ -233,6 +235,17 @@ echo "[8] Замок укладывается в своё время сам (р�
 # поэтому главный ассерт — по ТЕКСТУ цикла (правило 3г свода замков), а не по секундомеру.
 ok()  { PASS=$((PASS+1)); printf '  ✅ %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  ❌ %s\n' "$1"; }
+# Часы теста — без порождения процессов и без GNU date: `date +%s%N` на macOS печатает
+# букву N вместо наносекунд, и арифметика замера падает. bash 5+ — $EPOCHREALTIME
+# (микросекунды; разделитель дробной части зависит от локали), иначе — целые $SECONDS.
+now_ms() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    local t="${EPOCHREALTIME/[.,]/}"
+    NOW_MS=$(( 10#$t / 1000 ))
+  else
+    NOW_MS=$(( SECONDS * 1000 ))
+  fi
+}
 
 LOOP="$(sed -n '/^# ── НАЧАЛО РАЗБОРА СЕГМЕНТОВ/,/^# ── КОНЕЦ РАЗБОРА СЕГМЕНТОВ/p' "$HOOK" \
         | grep -v '^[[:space:]]*#' | sed 's/[[:space:]]#.*$//')"
@@ -307,7 +320,7 @@ CMD
 )"
 for spec in "allow|400 сегментов без опасного|LONG_OK" "deny|400 сегментов, опасное в конце|LONG_RED" "deny|форма 26.09: ssh + rm -rf по переменной|SHAPE"; do
   want="${spec%%|*}"; rest="${spec#*|}"; desc="${rest%%|*}"; var="${rest#*|}"
-  s="$(date +%s%N)"; OUT="$(run "${!var}" 2>/dev/null)"; e="$(date +%s%N)"; ms=$(( (e - s) / 1000000 ))
+  now_ms; s=$NOW_MS; OUT="$(run "${!var}" 2>/dev/null)"; now_ms; ms=$(( NOW_MS - s ))
   got="allow"; printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' && got="deny"
   if printf '%s' "$OUT" | grep -q 'НЕ УСПЕЛ'; then
     bad "${desc} — не уложился в бюджет (${ms} мс)"
@@ -317,6 +330,66 @@ for spec in "allow|400 сегментов без опасного|LONG_OK" "deny
     bad "${desc} — ${ms} мс, дольше бюджета ${BUDGET:-10} с"
   else
     ok "${desc} — ${got}, ${ms} мс"
+  fi
+done
+
+echo "[9] Бюджет покрывает весь замок, а не только цикл (разбор 06.10.2026)"
+# Дефект: бюджет проверялся только внутри цикла по сегментам, а до цикла замок порождал
+# процессы — `cat`, `python3` на разбор JSON, `tr`, `sed`. 03.10 на занятой машине оператора
+# замок шёл 36,5 с при таймауте движка 15 с, и движок выполнил команду без вердикта; та же
+# команда в спокойную минуту — 0,6 с. Медленный запуск подстраиваем подставным `python3`,
+# который висит 6 с, — только в PATH замка (правило 3д: условие навязывается подопечному),
+# бюджет — 2 с. Исправный замок отказывает сам примерно через 2 с; старый ждёт подставного
+# и пропускает. Секундомер здесь честный: задержка задана тестом, а не скоростью машины.
+# Время меряется по захвату stdout И stderr — с ожиданием, пока замок закроет обе трубы,
+# как ждёт движок: фоновая проверка, держащая любую из них, сорвала бы срок и здесь
+# (так и было на первой версии починки: `proverit 2>/dev/null` держал stderr — 6,5 с).
+MEDL="$TMP/medlennyj"; mkdir -p "$MEDL"
+printf '#!/usr/bin/env bash\nsleep 6\nexit 1\n' > "$MEDL/python3"; chmod +x "$MEDL/python3"
+for spec in "безобидная команда|ls -la" "команда красной зоны|${RED_SAMPLE}"; do
+  desc="${spec%%|*}"; cmd="${spec#*|}"
+  now_ms; s=$NOW_MS
+  OUT="$(HOOK_PATH="$MEDL:$PATH" HOOK_BUDGET_ENV=2 run "$cmd" 2>&1)"
+  now_ms; ms=$(( NOW_MS - s ))
+  if printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' \
+     && printf '%s' "$OUT" | grep -q 'НЕ УСПЕЛ' && [ "$ms" -lt 4000 ]; then
+    ok "медленный python3, ${desc} — отказ сам за ${ms} мс"
+  else
+    bad "медленный python3, ${desc} — ${ms} мс, вывод: ${OUT:0:100}"
+  fi
+done
+# Переносимость сторожа (правило 3г: поведение зависит от версии bash — ловится текстом). На
+# системном bash macOS (3.2) `$!` после `<( )` не задан, и под `set -u` голое `$!` обрывает
+# замок без вывода — то есть «разрешаю»; код `read -t` по таймауту (>128) bash отличает от
+# конца данных только с 4.0. Первая версия сторожа (6c19fbd) на оба наступила.
+STRAZH="$(sed -n '/^# ── Сторож времени/,$p' "$HOOK" | grep -v '^[[:space:]]*#')"
+if [ -z "$STRAZH" ]; then
+  bad "сторож времени не найден по маркеру — проверять нечего"
+else
+  if grep -Eq '=\$!([^:]|$)' <<<"$STRAZH"; then bad "номер фоновой проверки берётся голым \$! — на bash < 4.4 под set -u замок падает молча"
+  else ok "номер фоновой проверки — \${!:-}: на bash < 4.4 не падает"; fi
+  if grep -Eq '\$\?[[:space:]]*>[[:space:]]*128' <<<"$STRAZH"; then bad "таймаут узнаётся по коду read (>128) — на bash < 4.0 его нет"
+  elif grep -q 'KONETS_PROVERKI' <<<"$STRAZH"; then ok "завершение проверки — по метке конца, а не по коду read"
+  else bad "не нашёл, как сторож отличает завершение проверки от таймаута"; fi
+fi
+
+echo "[10] Сломанный python3 не делает замок немым (разбор 06.10.2026)"
+# Дефект: отказ печатался через python3, и если тот есть, но сразу падает (на Windows —
+# заглушка Microsoft Store без установленного Python), замок молчал с кодом 0 — движок
+# пропускал даже `docker volume rm`. Подставные python3 и jq падают мгновенно; опасное
+# обязано получить отказ, безобидное — пройти (разбор по сырому тексту входа остаётся).
+SLOM="$TMP/slomannyj"; mkdir -p "$SLOM"
+printf '#!/usr/bin/env bash\necho "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 9009\n' > "$SLOM/python3"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$SLOM/jq"
+chmod +x "$SLOM/python3" "$SLOM/jq"
+for spec in "deny|команда красной зоны|${RED_SAMPLE}" "allow|безобидная команда|ls -la"; do
+  want="${spec%%|*}"; rest="${spec#*|}"; desc="${rest%%|*}"; cmd="${rest#*|}"
+  OUT="$(HOOK_PATH="$SLOM:$PATH" run "$cmd" "$CONFIRMED" 2>/dev/null)"
+  got="allow"; printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' && got="deny"
+  if [ "$got" = "$want" ]; then
+    ok "сломанный python3, ${desc} — ${got}"
+  else
+    bad "сломанный python3, ${desc} — ожидали ${want}, получили ${got}${OUT:+, вывод: ${OUT:0:100}}"
   fi
 done
 
