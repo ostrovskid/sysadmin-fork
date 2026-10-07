@@ -100,16 +100,44 @@ if [ "$FORCE" -eq 0 ]; then
     printf '%s\n' "$NOW" > "$MARK" 2>/dev/null || true
 fi
 
+# Бюджет сетевого запроса (ADR-0043, правило 3е свода замков). http.lowSpeed* ниже ловит
+# зависшую ПЕРЕДАЧУ, но не зависшее СОЕДИНЕНИЕ: если адрес недоступен и пакеты теряются,
+# git ждёт дольше таймаута движка (замер 26.09.2026 — 22 с при таймауте SessionStart 20 с;
+# 20.09 GitHub был недоступен из региона оператора 12 часов). Движок обрывает хук и держит старт
+# сессии. Поэтому запрос идёт под своим сторожем: не уложился в NET_BUDGET — это «нет
+# сети», то есть молча, код 0 (проверка опциональна, метка уже записана — повтор завтра).
+# `timeout` из coreutils на macOS нет, поэтому сторож — фоновый процесс и опрос.
+# Переменная окружения может бюджет только уменьшить — для теста этой ветки.
+NET_BUDGET=12
+if [[ "${BRAIN_CHECK_NET_BUDGET:-}" =~ ^[0-9]+$ ]] && [ "$BRAIN_CHECK_NET_BUDGET" -lt "$NET_BUDGET" ]; then
+    NET_BUDGET="$BRAIN_CHECK_NET_BUDGET"
+fi
+# Вывод — в файл, а не в конвейер: дочерний git-remote-https переживает убитый git и держал
+# бы конвейер открытым до собственного отказа, то есть ровно столько, сколько мы не ждём.
+TAGS_FILE="$(mktemp 2>/dev/null)" || bail
+trap 'rm -f "$TAGS_FILE"' EXIT
+
 # Теги — прямо с удалённого. Никакого ввода: запрос пароля или окно менеджера учётных
 # данных на старте сессии повесили бы её до таймаута хука. Строки закрывают разные пути
 # и друг друга не заменяют: credential.interactive=never глушит менеджер учётных данных и
 # askpass на свежем git (на git 2.55 askpass не глушит больше ничто из списка — проверено
 # 15.09.2026), GIT_ASKPASS=false — askpass на git, который этой настройки не знает,
 # GIT_TERMINAL_PROMPT=0 — запрос в терминале, http.lowSpeed* — зависшую передачу.
-TAGS="$(GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_ASKPASS=false SSH_ASKPASS=false \
-        git -C "$ROOT" -c credential.interactive=never \
-            -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 \
-            ls-remote --tags --refs "$REMOTE" 2>/dev/null)" || bail
+GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_ASKPASS=false SSH_ASKPASS=false \
+    git -C "$ROOT" -c credential.interactive=never \
+        -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 \
+        ls-remote --tags --refs "$REMOTE" > "$TAGS_FILE" 2>/dev/null </dev/null &
+GIT_PID=$!
+TICKS=0
+while kill -0 "$GIT_PID" 2>/dev/null; do
+    if [ "$TICKS" -ge $((NET_BUDGET * 5)) ]; then
+        kill "$GIT_PID" 2>/dev/null
+        bail                                   # не уложились — как «нет сети»
+    fi
+    sleep 0.2; TICKS=$((TICKS + 1))
+done
+wait "$GIT_PID" || bail
+TAGS="$(cat "$TAGS_FILE")"
 
 # Только релизные теги vX.Y.Z (без -rc и прочего), порядок — по числам, а не по строкам:
 # строкой v2.9.0 «больше» v2.10.0.

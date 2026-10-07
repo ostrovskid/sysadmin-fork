@@ -273,6 +273,71 @@ PY
     fi
 fi
 
+echo "[10] Хук укладывается в своё время сам (ADR-0043, правило 3е)"
+# Дефект 26.09.2026: при недоступном адресе git ждал соединения 22 с при таймауте движка
+# 20 с — движок обрывал хук и держал старт сессии. http.lowSpeed* ловит зависшую передачу,
+# но не зависшее соединение. По тексту: бюджет есть и меньше таймаута движка из settings.
+BUDGET="$(grep -Eo '^NET_BUDGET=[0-9]+' "$CHECKER" | cut -d= -f2)"
+ENGINE_TO="$(python3 - "$SETTINGS" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for m in d.get("hooks", {}).get("SessionStart", []):
+    for h in m.get("hooks", []):
+        if "brain-update-check.sh" in h.get("command", ""):
+            print(h.get("timeout", 60))
+PY
+)"
+if [ -z "$BUDGET" ] || [ -z "$ENGINE_TO" ]; then
+    bad "не прочитал бюджет сети в хуке (${BUDGET:-нет}) или таймаут движка (${ENGINE_TO:-нет})"
+elif [ "$ENGINE_TO" -gt $((BUDGET + 3)) ]; then
+    ok "бюджет сети ${BUDGET} с с запасом меньше таймаута движка ${ENGINE_TO} с"
+else
+    bad "бюджет сети ${BUDGET} с не оставляет запаса до таймаута движка ${ENGINE_TO} с"
+fi
+# По поведению: сервер принимает соединение и молчит. Бюджет навязан подопечному через env
+# (правило 3д) и уменьшен до 2 с, чтобы не ждать; прежняя версия env не знает и ждёт свои
+# 10 с lowSpeedTime — на ней случай краснеет.
+if ! command -v python3 >/dev/null 2>&1; then
+    bad "нет python3 — случай с молчащим сервером не прогнан"
+else
+    HPORT="$TMP/hport"
+    python3 - "$HPORT" >/dev/null 2>&1 <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+conns = []
+while True:
+    c, _ = s.accept(); conns.append(c)      # принимаем и молчим
+PY
+    HSRV=$!
+    i=0; while [ ! -s "$HPORT" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+    if [ ! -s "$HPORT" ]; then
+        bad "молчащий сервер не поднялся — случай не прогнан"
+    else
+        B="$(mk_brain b30 '2.12.2\n')"
+        git -C "$B" remote add origin "http://127.0.0.1:$(cat "$HPORT")/brain.git"
+        started="$(date +%s)"
+        OUT="$(env BRAIN_CHECK_NET_BUDGET=2 NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 \
+               bash "$CHECKER" --root "$B" --force </dev/null 2>/dev/null)"; RC=$?
+        took=$(( $(date +%s) - started ))
+        if [ "$took" -le 6 ]; then ok "молчащий сервер — хук закончил сам за ${took} с при бюджете 2 с"
+        else bad "молчащий сервер — хук работал ${took} с при бюджете 2 с"; fi
+        expect_silent "не уложился в бюджет — молча, код 0 (как «нет сети»)"
+        OUT="$(env BRAIN_CHECK_NET_BUDGET=2 NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 \
+               bash "$CHECKER" --root "$B" --status </dev/null 2>/dev/null)"; RC=$?
+        if [ "$RC" -eq 1 ]; then ok "в режиме --status — код 1, процедура обновления остановится"
+        else bad "в режиме --status код $RC, ждали 1"; fi
+        # Переменная окружения бюджет не увеличивает. Текст — в переменную, поиск — по ней:
+        # `printf | grep -q` при pipefail роняет «найдено» в «не найдено» (урок
+        # grep-q-pipefail-false-alarm; на нём этот случай и споткнулся при написании).
+        CODE_NB="$(grep -v '^[[:space:]]*#' "$CHECKER")"
+        if grep -qF 'BRAIN_CHECK_NET_BUDGET" -lt "$NET_BUDGET"' <<<"$CODE_NB"; then
+            ok "переменная окружения может бюджет только уменьшить"
+        else bad "не нашёл ограничения «только уменьшить» для BRAIN_CHECK_NET_BUDGET"; fi
+    fi
+    kill "$HSRV" 2>/dev/null
+fi
+
 echo "[Вывод] Уведомление читаемо и адресовано агенту"
 B="$(mk_brain b21 '2.12.2\n')"; git -C "$B" remote add origin "$R"
 call "$B"
