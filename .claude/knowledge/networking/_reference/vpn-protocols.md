@@ -4,6 +4,8 @@ layer: reference
 last_researched: 2026-08-11
 ttl_days: 60
 sources_checked:
+  - https://github.com/refraction-networking/utls/blob/master/u_common.go
+  - https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f0
   - https://github.com/XTLS/REALITY
   - https://github.com/XTLS/Xray-core
   - https://github.com/XTLS/Xray-core/releases
@@ -241,6 +243,12 @@ AmneziaWG для Windows/Android/iOS.
 > Android OkHttp, а также 360 Browser и QQ Browser у большинства операторов
 > проходят (`habr.com/ru/articles/1044396/`, 06.06.2026). Отпечаток подбираем
 > под текущий фронт (`_live/frontline-ru.md`), а не фиксируем в шаблоне скилла.
+>
+> 🔴 **2026-10-15: `edge` с новыми Reality-серверами не работает.** С Xray-core
+> v26.9.8 Reality-сервер отвергает ClientHello без X25519MLKEM768, а `edge` в uTLS —
+> профиль Edge 85 без него. Из «проходящих» с серверами 26.9.8+ годится `firefox`
+> (разбор и источники — `fronting-strategies.md` §6, `transports.md` §13.5).
+
 
 ### 1.8 Hysteria 2 и TUIC
 

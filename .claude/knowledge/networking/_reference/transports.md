@@ -60,6 +60,8 @@ sources_checked:
   - https://newreleases.io/project/github/XTLS/Xray-core/release/v26.1.23
   - https://newreleases.io/project/github/SagerNet/sing-box/release/v1.7.0
   - https://newreleases.io/project/github/SagerNet/sing-box/release/v1.12.0
+  - https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f0
+  - https://github.com/refraction-networking/utls/blob/master/u_common.go
 ---
 
 # Транспорты Xray/sing-box: карта и выбор
@@ -524,8 +526,13 @@ HIGH: [XTLS/REALITY README](https://github.com/XTLS/REALITY/blob/main/README.en.
 отнесён к подозрительным для РФ, рабочими названы `firefox` и `edge` — основания
 и разбор в `_reference/fronting-strategies.md` §6.
 
+🔴 **`edge` несовместим с Reality-сервером Xray ≥ v26.9.8** (см. §13.5): в uTLS это
+старый профиль Edge 85 без обмена ключами X25519MLKEM768. Из пары «`firefox` или
+`edge`» с новыми серверами остаётся только `firefox`.
+
 **Известный баг:** `chrome_pq` fingerprint **НЕ работает** с VLESS+XTLS-REALITY
-(sing-box #2084, Xray-core #4852). Работают: `chrome`, `firefox`, `edge`.
+(sing-box #2084, Xray-core #4852). Работают: `chrome`, `firefox`, `safari`;
+`edge` — только с Reality-сервером старше v26.9.8.
 
 ### 13.4 Reality fallback
 
@@ -560,11 +567,30 @@ HIGH: [XTLS/REALITY README](https://github.com/XTLS/REALITY/blob/main/README.en.
   в коммите это помечено как «change it at your own risk». Проверять при каждом
   обновлении ядра на панели
   ([коммит af7eb68](https://github.com/XTLS/Xray-core/commit/af7eb68028732a8ee3c0e5d6ab2b8a657bb2e770)).
+- 🔴 **`v26.7.11`** — заодно **клиент** перестал собирать исходящий VLESS и Trojan без
+  шифрования на публичный адрес: нет TLS/REALITY и `encryption` пуст или `none` →
+  «vless without TLS or other encryption is prohibited unless the server address is a
+  private IP or domain». Флага, отключающего проверку, нет; исключение — частные
+  адреса и домены (`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `.lan`, `.local` и
+  т.п.). Следствие для РФ-входа — §14, оговорка (*)
+  ([PR #6303](https://github.com/XTLS/Xray-core/pull/6303), коммит `d7fa2076c3`).
+- 🔴 **`v26.9.8`** (08.09.2026) — REALITY-сервер отвергает ClientHello без
+  X25519MLKEM768 перед необязательным X25519: такое соединение не признаётся
+  REALITY и уходит на `dest` (отказ выглядит как «не подключается», а не как
+  ошибка TLS). Настройки, отключающей проверку, нет. Под отказ попадает отпечаток
+  `edge` — в uTLS это `HelloEdge_Auto = HelloEdge_85`, профиль без MLKEM
+  ([REALITY, коммит 8cdf7bf9c7](https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f0),
+  в `go.mod` Xray — с v26.9.8;
+  [uTLS `u_common.go`](https://github.com/refraction-networking/utls/blob/master/u_common.go)).
+  Стенд участника Nike152 (14.10.2026, комментарий к vefmvai/sysadmin#15): с
+  Reality-сервером 26.10.10 `firefox`/`chrome`/`safari` проходят, `edge` — нет, на
+  сервере 26.4.25 `edge` проходит. Перед обновлением ядра на своём сервере — проверить
+  отпечатки клиентов и исходящих.
 
 ### 13.6 Рекомендуемая комбинация для РФ-2026
 
 ```
-VLESS + TCP + REALITY + xtls-rprx-vision + uTLS(firefox или edge)
+VLESS + TCP + REALITY + xtls-rprx-vision + uTLS(firefox)
 ```
 
 С dest = `www.microsoft.com` или `github.com` (без CDN в РФ).
@@ -572,8 +598,9 @@ VLESS + TCP + REALITY + xtls-rprx-vision + uTLS(firefox или edge)
 ⚠️ Отпечаток в этой строке изменён 2026-08-11: раньше здесь стоял «chrome или
 firefox». С июня 2026 `chrome` (вместе с `safari` и `ios`) отнесён к подозрительным
 для РФ, проходящими названы `firefox`, `edge` и Android OkHttp — разбор и источник
-в `_reference/fronting-strategies.md` §6. Отпечаток подбирают под текущий фронт,
-а не фиксируют в шаблоне навсегда.
+в `_reference/fronting-strategies.md` §6. **2026-10-15 `edge` убран:** с
+Reality-сервером Xray ≥ v26.9.8 он не подключается (§13.5). Отпечаток подбирают под
+текущий фронт, а не фиксируют в шаблоне навсегда.
 
 Источник: [Xray-core discussion #3518](https://github.com/XTLS/Xray-core/discussions/3518),
 [Xray-examples](https://github.com/XTLS/Xray-examples/blob/main/VLESS-TCP-XTLS-Vision-REALITY/config_server.jsonc).
@@ -594,7 +621,8 @@ firefox». С июня 2026 `chrome` (вместе с `safari` и `ios`) отн�
 │       └── UDP — риск блокировки в РФ-2026
 ├── Цель — multi-hop через свой RU-VPS
 │   ├── RU-VPS → загр.VPS outbound: VLESS+Reality или SS2022 (DC-to-DC режется мягче)
-│   └── Клиент → RU-VPS: внутри РФ, маскировка не нужна — голый VLESS-TCP (*)
+│   └── Клиент → RU-VPS: внутри РФ маскировка не нужна, но голый VLESS-TCP
+│       штатный клиент (Happ на Xray) не берёт — нужен TLS или VLESS `encryption` (*)
 └── Цель — CDN-fronting (за Cloudflare Workers)
     └── WebSocket — единственный совместимый транспорт
 ```
@@ -604,12 +632,21 @@ firefox». С июня 2026 `chrome` (вместе с `safari` и `ios`) отн�
 outbound нет TLS/REALITY, а у VLESS `encryption` пуст или `none`, конфиг не
 собирается — «vless without TLS or other encryption is prohibited unless the
 server address is a private IP or domain»
-([PR #6303](https://github.com/XTLS/Xray-core/pull/6303)). Проверка стоит
-**только на outbound**: голый VLESS-TCP **inbound** на самом RU-VPS (то, что
-настраивает 3X-UI) ею не затронут, и клиенты не на Xray-ядре (sing-box, Happ на
-sing-box, mihomo) под неё не подпадают. Итог: связка «клиент → RU-VPS голым
-VLESS-TCP» остаётся рабочей, пока клиент не на Xray; для Xray-клиента и для
-Xray-outbound с RU-VPS нужен TLS/REALITY либо VLESS `encryption`.
+([PR #6303](https://github.com/XTLS/Xray-core/pull/6303)). Проверка стоит на
+стороне **клиента** — в его исходящем соединении: голый VLESS-TCP **inbound** на
+самом RU-VPS (то, что настраивает 3X-UI) ядро сервера по-прежнему принимает,
+отказывается подключаться клиент. Под проверку не подпадают только клиенты не на
+Xray-ядре (sing-box, Happ на sing-box, mihomo) и частные адреса.
+
+**Итог (исправлен 2026-10-15):** штатный клиент канона — **Happ, по умолчанию на
+Xray-ядре** (рефлекс 3.8.3) — и свежее ядро приходит вместе с обновлением приложения. Поэтому на практике
+связка «клиент → RU-VPS голым VLESS-TCP» у штатного клиента **не работает**: после
+обновления приложения телефоны перестают подключаться к РФ-входу без TLS при
+исправном сервере (наблюдение участника Nike152 от 2026-10-13, комментарий к
+vefmvai/sysadmin#15). Прежний вывод «остаётся рабочей, пока клиент не на Xray»
+верен по механизму, но для штатного клиента неприменим. РФ-вход и Xray-outbound с
+RU-VPS — только с TLS/REALITY либо VLESS `encryption`; какой путь брать
+каноном — открытый вопрос (предложение VLESS+TLS — vefmvai/sysadmin#24).
 
 Подробнее по fronting-стратегиям — `_reference/fronting-strategies.md`.
 

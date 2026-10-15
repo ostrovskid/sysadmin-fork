@@ -36,6 +36,24 @@
   - `server-networks-defaults.md` — срок свежести продлён (содержание не менялось),
     убраны пережитки отменённых диаграмм (ADR-0019).
 
+### Исправлено
+
+- **По разбору @Nike152 к этой заявке (14.10.2026) — три места ревизии, каждое сверено
+  по первоисточнику:**
+  - `web-and-vpn-coexistence.md` §5 — `sockopt.trustedXForwardedFor` принимает список
+    **имён заголовков**, а не адресов: исходник `headers.go` (`ApplyTrustedXForwardedFor`)
+    и мейнтейнер в XTLS/Xray-core#6370. Для раскладки A — `["X-Forwarded-For"]`, и nginx
+    должен перезаписывать заголовок (`$remote_addr`), а не дописывать к нему: Xray берёт
+    первое значение, а с `$proxy_add_x_forwarded_for` оно приходит от клиента;
+  - отпечаток `edge` — в uTLS это `HelloEdge_85` без X25519MLKEM768, а Reality-сервер
+    Xray ≥ 26.9.8 такой ClientHello отвергает (REALITY `8cdf7bf9c7`, в `go.mod` Xray с
+    v26.9.8). Рекомендация для РФ — `firefox`: `fronting-strategies.md` §6/§9,
+    `transports.md` §13.3/§13.5/§13.6, `vpn-protocols.md`;
+  - `transports.md` §14 — вывод «голый VLESS-TCP к RU-VPS остаётся рабочим, пока клиент
+    не на Xray» неприменим к штатному клиенту: Happ по умолчанию на Xray, а с v26.7.11
+    Xray-клиент не собирает VLESS без TLS/REALITY и без `encryption` на публичный адрес
+    (Xray-core#6303). Канон РФ-входа здесь не меняется — это #24.
+
 ## [2.12.2] — 2026-08-28
 
 Разбор PR #13 и issue #14 от @ostrovskid: обе находки — про среду, где мозг работает,

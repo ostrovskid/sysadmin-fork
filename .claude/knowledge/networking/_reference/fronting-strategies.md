@@ -22,6 +22,8 @@ sources_checked:
   - https://habr.com/ru/articles/1044396/
   - https://habr.com/ru/articles/1047442/
   - https://ebyebots.ru/blog/rkn-«polozhil»-runet-massovyj-sboj-sajtov-na-hostingah-beget-timeweb-selectel-i-spaceweb-iz-za-obnovleniya-nastroek-tspu/
+  - https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f0
+  - https://github.com/refraction-networking/utls/blob/master/u_common.go
 ---
 
 # Fronting-стратегии: маскировка под легитимный трафик
@@ -287,12 +289,29 @@ DPI может различить: «это не Chrome/Firefox, это кака
   см. рекомендацию ниже)
 - `"firefox"` — Firefox
 - `"safari"` — Safari
-- `"edge"` — Edge (новее Chrome-варианта)
+- `"edge"` — **старый** профиль Edge 85 (в uTLS `HelloEdge_Auto = HelloEdge_85`), без
+  обмена ключами X25519MLKEM768; ⚠️ с Reality-сервером Xray ≥ v26.9.8 не подключается
+  (см. рекомендацию ниже)
 - `"random"` / `"randomized"` — каждое соединение — новый fingerprint
 - ⚠️ `"chrome_pq"` — **СЛОМАН** с VLESS+XTLS-REALITY (sing-box #2084, Xray #4852)
 
-**Рекомендация для РФ-2026 (пересмотрено 2026-08-11):** `firefox` или `edge`.
-С июня 2026 ТСПУ относит к подозрительным отпечатки `chrome`, `safari`, `ios`;
+**Рекомендация для РФ-2026 (пересмотрено 2026-08-11, уточнено 2026-10-15):** `firefox`.
+
+🔴 **`edge` из пары выпал (2026-10-15).** С Xray-core v26.9.8 Reality-сервер
+отвергает ClientHello без X25519MLKEM768 перед необязательным X25519 — такое
+соединение не признаётся REALITY и уходит на донор, клиент просто не подключается
+(HIGH: [REALITY, коммит 8cdf7bf9c7](https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f0)
+от 2026-09-08, в `go.mod` Xray — с v26.9.8). Отпечаток `edge` в uTLS — профиль Edge 85
+без этого обмена (HIGH: [uTLS `u_common.go`](https://github.com/refraction-networking/utls/blob/master/u_common.go),
+`HelloEdge_Auto = HelloEdge_85`). Стенд участника Nike152 (14.10.2026, комментарий к
+vefmvai/sysadmin#15): Reality-сервер 26.10.10 пропускает `firefox`, `chrome`,
+`safari` и отвергает `edge`; сервер 26.4.25 `edge` пропускает. То есть `edge`
+обрывает связь, как только сервер — свой или провайдера — обновится до 26.9.8+.
+Из пары, которую в июне относили к проходящим ТСПУ, с новыми серверами совместим
+только `firefox`. *Исправлено по разбору Nike152 к vefmvai/sysadmin#15.*
+
+Наблюдения комьюнити о ТСПУ, на которых держалась июньская пара:
+с июня 2026 ТСПУ относит к подозрительным отпечатки `chrome`, `safari`, `ios`;
 `firefox`, `edge`, Android OkHttp у большинства операторов пока проходят
 (MEDIUM: [Habr 1044396](https://habr.com/ru/articles/1044396/) от 2026-06-06,
 апдейт от 2026-06-16 — наблюдения комьюнити, не спецификация ТСПУ). Само
@@ -308,7 +327,7 @@ TLS-хендшейков к одному SNI за 60 с»; штраф — зам
 наблюдения комьюнити, не спецификация ТСПУ).
 `random` больше не нейтральный выбор: гарантии, что случайный профиль не
 окажется chrome-подобным, нет, поэтому до следующей проверки фиксирую явный
-`firefox`/`edge`. Менять отпечаток на лету, когда заморозка уже наступила,
+`firefox`. Менять отпечаток на лету, когда заморозка уже наступила,
 не следует.
 
 ---
@@ -369,13 +388,14 @@ Mediazona проверила 10 000 самых популярных домено
     └── XHTTP за СВОИМ Nginx с LE-сертификатом (НЕ за CDN); см. _reference/transports.md §3
 
 Цель: спрятать VPN-протокол на TLS-уровне
-├── Лучший выбор: VLESS+Reality+Vision+uTLS(firefox|edge) с donor=microsoft.com или github
+├── Лучший выбор: VLESS+Reality+Vision+uTLS(firefox) с donor=microsoft.com или github
+│   (edge — нет: Reality-сервер Xray ≥ v26.9.8 его отвергает, см. §6)
 └── Дополнительно: мультиплексирование — одно долгоживущее соединение вместо
     нескольких параллельных. С июня 2026 заморозку в РФ включает связка
     «более 3 параллельных TLS-хендшейков к одному SNI, идущих всплеском
     (~350-400 мс между хендшейками), в пределах 60 с» на подозрительной
     подсети (MEDIUM: Habr 1044396 от 2026-06-06, Habr 1047442 от 2026-06-15).
-    Отпечаток при этом фиксируем firefox/edge (см. §6), менять его на лету
+    Отпечаток при этом фиксируем firefox (см. §6), менять его на лету
     во время активной заморозки не следует.
 
 Цель: обойти blacklist VPS-IP западными AI-сервисами

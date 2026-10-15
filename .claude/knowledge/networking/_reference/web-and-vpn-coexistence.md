@@ -2,9 +2,10 @@
 knowledge_domain: vpn
 layer: reference
 last_researched: 2026-08-11
-last_updated: 2026-08-11
+last_updated: 2026-10-15
 ttl_days: 60
 sources_checked:
+  - https://github.com/XTLS/Xray-core/blob/v26.10.10/common/protocol/http/headers.go
   - https://xtls.github.io/en/config/transports/splithttp.html
   - https://xtls.github.io/en/config/transports/httpupgrade.html
   - https://github.com/XTLS/REALITY/blob/main/README.en.md
@@ -269,14 +270,26 @@ Xray на 443 принимает TLS, и по **SNI** (имени домена �
   v26.6.22 (PR #6309 от 18.06.2026) — ещё и `sockopt.trustedXForwardedFor`: серверы
   XHTTP/WS/HTTPUpgrade/gRPC перестали доверять заголовку `X-Forwarded-For` по умолчанию,
   и без этого поля в логах, IP-лимитах и правилах маршрутизации по адресу вместо
-  клиента виден локальный адрес nginx. Поле принимает **список доверенных
-  адресов-источников в нотации IP/CIDR**, а не имя заголовка: для раскладки A это
-  локальный адрес nginx — `"sockopt": { "trustedXForwardedFor": ["127.0.0.1"] }`.
-  Оговорка: жалуются ровно на эту конфигурацию — в сборках v26.6.22 сообщали о ложном
-  `ignored potentially forged X-Forwarded-For` при корректном списке, и ядро ругается
-  именно на `127.0.0.1` и unix-сокет (XTLS/Xray-core#6370, #6381). Поэтому после
-  настройки проверять **живым тестом**, доезжает ли до логов и правил реальный адрес
-  клиента, а не адрес nginx;
+  клиента виден локальный адрес nginx. Поле принимает **список имён заголовков**, а
+  не адресов-источников (в отличие от nginx `set_real_ip_from`): если в запросе есть
+  любой заголовок из списка, ядро берёт адресом клиента **первое** значение
+  `X-Forwarded-For`; если ни одного нет — пишет `ignored potentially forged
+  "X-Forwarded-For"` и оставляет адрес соединения (HIGH: исходник
+  [`common/protocol/http/headers.go`](https://github.com/XTLS/Xray-core/blob/v26.10.10/common/protocol/http/headers.go),
+  `ApplyTrustedXForwardedFor`; мейнтейнер в
+  [XTLS/Xray-core#6370](https://github.com/XTLS/Xray-core/issues/6370): для
+  безусловного доверия — `["X-Forwarded-For"]`). Для раскладки A, где инбаунд слушает
+  только `127.0.0.1` и попасть на него можно лишь через nginx, —
+  `"sockopt": { "trustedXForwardedFor": ["X-Forwarded-For"] }`. Тогда nginx обязан
+  **перезаписывать** заголовок, а не дописывать к нему: `proxy_set_header
+  X-Forwarded-For $remote_addr;` — с `$proxy_add_x_forwarded_for` первым значением
+  окажется то, что прислал сам клиент, и он подставит любой адрес. Жалобы на ложное
+  `ignored potentially forged` при `["127.0.0.1"]` (#6370, #6381, обе закрыты как
+  not planned) — ровно оттого, что в список вписан адрес вместо имени заголовка.
+  *Исправлено 2026-10-15 по разбору Nike152 к vefmvai/sysadmin#15: прежний текст
+  называл поле списком адресов и советовал `["127.0.0.1"]`.* После настройки проверять
+  **живым тестом**, доезжает ли до логов и правил реальный адрес клиента, а не адрес
+  nginx;
 - если не лечится для конкретных клиентов — **держать запасной Reality-инбаунд на
   отдельном порту** (например 8443) для проблемных клиентов. Это легитимное «и-и»:
   XHTTP за nginx для большинства + прямой Reality на 8443 для капризных.
