@@ -263,19 +263,26 @@ bash "$SYSADMIN_ROOT/.claude/skills/sysadmin-init/scripts/migrate-legacy.sh" \
 блоки только при `*_ENABLED=true`. Агент выставляет переменные по ответам и вызывает:
 
 ```bash
-NAME="$NAME" LANG="$LANG" TIMEZONE="$TIMEZONE" MANAGER="$MANAGER" \
-  PROJ_ID="$PROJ_ID" PROJ_INFRA_ROOT="$PROJ_INFRA_ROOT" \
-  SRV_ALIAS="$SRV_ALIAS" SRV_SSH="$SRV_SSH" SRV_ROLE="$SRV_ROLE" \
-  ${PROJ_TITLE:+PROJ_TITLE="$PROJ_TITLE"} ${SRV_DOMAIN:+SRV_DOMAIN="$SRV_DOMAIN"} \
-  ${MANAGER_NAME:+MANAGER_NAME="$MANAGER_NAME" CLI_AVAILABLE="$CLI_AVAILABLE"} \
-  ${MON_ENABLED:+MON_ENABLED=true MON_STACK_JSON="$MON_STACK_JSON" MON_PANEL_DOMAIN="$MON_PANEL_DOMAIN"} \
-  ${BACKUPS_ENABLED:+BACKUPS_ENABLED=true BACKUPS_DESTINATION="$BACKUPS_DESTINATION" BACKUPS_RETENTION_JSON="$BACKUPS_RETENTION_JSON" BACKUPS_RCLONE_REMOTE="$BACKUPS_RCLONE_REMOTE"} \
-  ${BACKUPS_SFTP_HOST:+BACKUPS_SFTP_HOST="$BACKUPS_SFTP_HOST" BACKUPS_SFTP_PATH="$BACKUPS_SFTP_PATH"} \
-  ${BACKUPS_SFTP_USER:+BACKUPS_SFTP_USER="$BACKUPS_SFTP_USER"} \
-  ${TG_ENABLED:+TG_ENABLED=true TG_BOT_USERNAME="$TG_BOT_USERNAME" TG_CHAT_TYPE="$TG_CHAT_TYPE"} \
-  ${VPN_ENABLED:+VPN_ENABLED=true} \
-  ${BRAIN_EXISTS:+AGENT_CURRENT="$BRAIN_PATH"} ${INFRA_EXISTS:+INFRA_CURRENT="$INFRA_CONFIG_PATH"} \
-  bash "$SYSADMIN_ROOT/.claude/skills/sysadmin-init/scripts/assemble-configs.sh" "$WORKDIR" "$SYSADMIN_ROOT"
+# Присваивания — массивом и через env. Запись `${X:+X="$X"}` перед командой присваиванием
+# НЕ является: bash распознаёт присваивания до раскрытия, и раскрытый текст становится
+# именем команды — «command not found», draft'ов нет (найдено 2026-10-19). Массив и env
+# одинаково работают в bash и zsh.
+A=(NAME="$NAME" LANG="$LANG" TIMEZONE="$TIMEZONE" MANAGER="$MANAGER"
+   PROJ_ID="$PROJ_ID" PROJ_INFRA_ROOT="$PROJ_INFRA_ROOT"
+   SRV_ALIAS="$SRV_ALIAS" SRV_SSH="$SRV_SSH" SRV_ROLE="$SRV_ROLE")
+[ -n "${PROJ_TITLE:-}" ]      && A+=(PROJ_TITLE="$PROJ_TITLE")
+[ -n "${SRV_DOMAIN:-}" ]      && A+=(SRV_DOMAIN="$SRV_DOMAIN")
+[ -n "${MANAGER_NAME:-}" ]    && A+=(MANAGER_NAME="$MANAGER_NAME" CLI_AVAILABLE="$CLI_AVAILABLE")
+[ -n "${MON_ENABLED:-}" ]     && A+=(MON_ENABLED=true MON_STACK_JSON="$MON_STACK_JSON" MON_PANEL_DOMAIN="$MON_PANEL_DOMAIN")
+[ -n "${BACKUPS_ENABLED:-}" ] && A+=(BACKUPS_ENABLED=true BACKUPS_DESTINATION="$BACKUPS_DESTINATION"
+                                     BACKUPS_RETENTION_JSON="$BACKUPS_RETENTION_JSON" BACKUPS_RCLONE_REMOTE="${BACKUPS_RCLONE_REMOTE:-}")
+[ -n "${BACKUPS_SFTP_HOST:-}" ] && A+=(BACKUPS_SFTP_HOST="$BACKUPS_SFTP_HOST" BACKUPS_SFTP_PATH="$BACKUPS_SFTP_PATH")
+[ -n "${BACKUPS_SFTP_USER:-}" ] && A+=(BACKUPS_SFTP_USER="$BACKUPS_SFTP_USER")
+[ -n "${TG_ENABLED:-}" ]      && A+=(TG_ENABLED=true TG_BOT_USERNAME="$TG_BOT_USERNAME" TG_CHAT_TYPE="$TG_CHAT_TYPE")
+[ -n "${VPN_ENABLED:-}" ]     && A+=(VPN_ENABLED=true)
+[ -n "${BRAIN_EXISTS:-}" ]    && A+=(AGENT_CURRENT="$BRAIN_PATH")
+[ -n "${INFRA_EXISTS:-}" ]    && A+=(INFRA_CURRENT="$INFRA_CONFIG_PATH")
+env "${A[@]}" bash "$SYSADMIN_ROOT/.claude/skills/sysadmin-init/scripts/assemble-configs.sh" "$WORKDIR" "$SYSADMIN_ROOT"
 # draft'ы лежат тут (используются Шагами 9–10):
 AGENT_DRAFT="$WORKDIR/agent-config-draft.json"; INFRA_DRAFT="$WORKDIR/infra-config-draft.json"
 ```

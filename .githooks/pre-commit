@@ -169,7 +169,8 @@ fi
 #     валидным по схеме, а скилл рапортует «✅ проверено». Тест держит режим слияния.
 # ===========================================================================
 ASM_TOUCHED=0
-case "$STAGED" in *"assemble-configs.sh"*) ASM_TOUCHED=1 ;; esac
+# SKILL.md скилла — тоже: тест исполняет вызов сборщика из его Шага 8 (случай 9, 2026-10-19).
+case "$STAGED" in *"assemble-configs.sh"*|*"sysadmin-init/SKILL.md"*) ASM_TOUCHED=1 ;; esac
 
 if [ "$ASM_TOUCHED" -eq 1 ]; then
     ASMTEST="$ROOT/scripts/test-assemble-configs.sh"

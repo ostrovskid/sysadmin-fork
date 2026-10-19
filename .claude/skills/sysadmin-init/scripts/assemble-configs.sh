@@ -189,18 +189,23 @@ if [ -n "${BACKUPS_ENABLED:-}" ]; then
     # sftp-приёмник (свой второй сервер, ADR-0041). host+path обязательны по схеме;
     # user опционален — нужен, только если пользователь не задан ssh-алиасом источника.
     if [ -n "${BACKUPS_SFTP_HOST:-}" ] || [ -n "${BACKUPS_SFTP_PATH:-}" ] || [ -n "${BACKUPS_SFTP_USER:-}" ]; then
-        # Значения берём ЧЕРЕЗ ОКРУЖЕНИЕ (env.VAR), а не через --arg. Причина: на Windows
-        # в Git Bash jq — программа Windows, и MSYS подменяет её аргументы, похожие на
-        # POSIX-путь: `--arg p /data/srv1` молча превращается в
-        # `C:/Program Files/Git/data/srv1`, и в конфиг уезжает чужой путь. Значения
-        # переменных окружения не подменяются. Поймано тестом 2026-09-24.
-        _SFTP_H="${BACKUPS_SFTP_HOST:-}" _SFTP_P="${BACKUPS_SFTP_PATH:-}" _SFTP_U="${BACKUPS_SFTP_USER:-}" \
-        jq '
+        # Путь приёмника — путь на ЧУЖОМ сервере. На Windows в Git Bash jq — программа
+        # Windows, и MSYS молча переписывает в путь Windows всё, что похоже на POSIX-путь,
+        # и в аргументах, и в переменных окружения: в конфиг уезжал
+        # `C:/Program Files/Git/data/srv1`. Поэтому значения идут аргументами при
+        # выключенной конверсии (MSYS2_ARG_CONV_EXCL='*'), а черновик — через stdin: путь к
+        # файлу jq тогда не нужен, открывает файл сам bash. Окружение не годится: нативный jq
+        # читает его в кодовой странице ANSI (кириллица → «?»), а при опции MSYS
+        # noemptyenvvalues пустые переменные не доходят вовсе. Вне Windows переменную никто
+        # не читает. Аргументы поймал тест 2026-09-24, окружение — разбор 2026-10-18/19
+        # (ADR-0042, дополнение 2026-10-19).
+        MSYS2_ARG_CONV_EXCL='*' jq \
+            --arg h "${BACKUPS_SFTP_HOST:-}" --arg p "${BACKUPS_SFTP_PATH:-}" --arg u "${BACKUPS_SFTP_USER:-}" '
             .backups.sftp = ( (.backups.sftp // {})
-              + (if env._SFTP_H != "" then {host: env._SFTP_H} else {} end)
-              + (if env._SFTP_P != "" then {path: env._SFTP_P} else {} end)
-              + (if env._SFTP_U != "" then {user: env._SFTP_U} else {} end) )' \
-           "$INFRA_DRAFT" > "$_x" && _apply "$INFRA_DRAFT"
+              + (if $h != "" then {host: $h} else {} end)
+              + (if $p != "" then {path: $p} else {} end)
+              + (if $u != "" then {user: $u} else {} end) )' \
+           < "$INFRA_DRAFT" > "$_x" && _apply "$INFRA_DRAFT"
     fi
 fi
 

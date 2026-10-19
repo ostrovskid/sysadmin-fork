@@ -20,11 +20,17 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 ASM="${ASSEMBLE_SH:-$ROOT/.claude/skills/sysadmin-init/scripts/assemble-configs.sh}"
+# Вызов сборщика из Шага 8 берётся из самого SKILL.md (случай 9): документ — источник, а не
+# копия в тесте. SKILL_MD подменяется для прогона на исторической версии описания.
+SKILL_MD="${SKILL_MD:-$ROOT/.claude/skills/sysadmin-init/SKILL.md}"
 
-# ВНИМАНИЕ. Здесь намеренно НЕ выставляется MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL: на Windows
-# они ломают сам jq (он программа Windows и перестаёт открывать пути вида /tmp/...).
-# Подмену POSIX-путей в аргументах jq лечит сам сборщик — он передаёт такие значения через
-# окружение (env.VAR). Случай «путь приёмника дошёл без искажений» ниже это и проверяет.
+# ВНИМАНИЕ (Windows, Git Bash). jq здесь — программа Windows, и MSYS переписывает в путь
+# Windows всё, что похоже на POSIX-путь: аргументы, значения переменных окружения и даже
+# литерал внутри фильтра (`'.x=="/data/srv1"'`). Прежняя проверка пути сравнивала
+# испорченное значение с так же испорченным литералом и зеленела на дефекте (найдено
+# 2026-10-18, ADR-0042, дополнение 2026-10-19). Поэтому `check` отдаёт фильтр в jq как есть
+# (MSYS2_ARG_CONV_EXCL='*'), а файл — через stdin: путь к файлу jq тогда не нужен вовсе.
+# Глобально выключатель не ставим: сборщику он сломал бы открытие черновиков.
 
 command -v jq >/dev/null 2>&1 || { echo "ОТКАЗ: нет jq — проверить нечем."; exit 2; }
 [ -f "$ASM" ] || { echo "ОТКАЗ: не найден сборщик: $ASM"; exit 2; }
@@ -38,7 +44,7 @@ PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  ✅ $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  ❌ $1"; echo "      $2"; }
 check() {  # $1=описание  $2=jq-выражение (true/false)  $3=файл
-    local got; got="$(jq -r "$2" "$3" 2>/dev/null)"
+    local got; got="$(MSYS2_ARG_CONV_EXCL='*' jq -r "$2" < "$3" 2>/dev/null)"
     [ "$got" = "true" ] && ok "$1" || bad "$1" "ожидалось true, получено: '${got:-<пусто>}'"
 }
 
@@ -111,7 +117,8 @@ if [ -f "$D" ]; then
     check "канал Telegram сохранён"               '.notifications.telegram.bot_username=="alerts_bot"' "$D"
     check "бэкапы включены и приёмник записан"    '(.backups.enabled==true) and (.backups.destination=="sftp") and (.backups.sftp.host=="backup-host")' "$D"
     # Отдельно и явно: путь приёмника — POSIX-абсолютный, и на Windows его молча
-    # подменял MSYS при вызове jq (см. шапку). Проверяем посимвольное совпадение.
+    # подменял MSYS при вызове jq — и в аргументе, и в окружении (см. шапку).
+    # Проверяем посимвольное совпадение; литерал фильтра защищён в самой `check`.
     check "путь приёмника дошёл без искажений"    '.backups.sftp.path=="/data/srv1"' "$D"
     check "retention записан объектом"            '.backups.retention.daily==7' "$D"
 else
@@ -179,6 +186,78 @@ if INFRA_CURRENT="$W5/нет-такого.json" SRV_ALIAS=SRV SRV_SSH=SRV SRV_RO
     bad "несуществующий INFRA_CURRENT → должен быть отказ" "скрипт вернул 0"
 else
     ok "несуществующий INFRA_CURRENT → отказ"
+fi
+echo
+
+# ── Случай 7 [дефект]: первичная настройка с SFTP, кириллица и пробел в пути ─
+# Блок sftp выполняется и без живого файла. Через окружение нативный jq читал значение в
+# кодовой странице ANSI (кириллица → «?»), а MSYS переписывал путь — оба дефекта здесь.
+W7="$TMP/c7"; mkdir -p "$W7"
+NAME=Оператор LANG=ru TIMEZONE=Asia/Almaty MANAGER=keepassxc PROJ_ID=proj PROJ_INFRA_ROOT=C:/work/proj \
+SRV_ALIAS=SRV SRV_SSH=SRV SRV_ROLE=production \
+BACKUPS_ENABLED=true BACKUPS_DESTINATION=sftp BACKUPS_SFTP_HOST=backup-host BACKUPS_SFTP_PATH='/данные/srv 1' \
+bash "$ASM" "$W7" "$ROOT" >/dev/null 2>&1
+echo "[дефект] первичная настройка: путь приёмника с кириллицей и пробелом"
+check "путь дошёл без искажений"                  '.backups.sftp.path=="/данные/srv 1"' "$W7/infra-config-draft.json"
+check "хост записан"                              '.backups.sftp.host=="backup-host"' "$W7/infra-config-draft.json"
+echo
+
+# ── Случай 8 [дефект]: слияние — меняем только путь, хост и пользователь живы ─
+W8="$TMP/c8"; mkdir -p "$W8"; mk_infra "$W8/base.json"; mk_agent "$W8/live-agent.json"
+MSYS2_ARG_CONV_EXCL='*' jq '.backups={"enabled":true,"destination":"sftp","sftp":{"host":"old-host","user":"bkp","path":"/data/old"}}' \
+    < "$W8/base.json" > "$W8/live-infra.json"
+AGENT_CURRENT="$W8/live-agent.json" INFRA_CURRENT="$W8/live-infra.json" \
+BACKUPS_ENABLED=true BACKUPS_DESTINATION=sftp BACKUPS_SFTP_PATH=/data/new \
+bash "$ASM" "$W8" "$ROOT" >/dev/null 2>&1
+echo "[дефект] слияние блока sftp: меняем только путь"
+check "новый путь записан без искажений"          '.backups.sftp.path=="/data/new"' "$W8/infra-config-draft.json"
+check "хост и пользователь из живой карты целы"   '(.backups.sftp.host=="old-host") and (.backups.sftp.user=="bkp")' "$W8/infra-config-draft.json"
+echo
+
+# ── Случай 9 [дефект]: вызов из Шага 8 SKILL.md исполняется как написан ───────
+# Прежний вызов передавал необязательные блоки записью `${X:+X="$X"}` перед командой — это
+# не присваивание, а имя команды: «command not found», draft'ов нет, и все гарантии
+# ADR-0042 оставались только в вызове, который агент соберёт сам (найдено 2026-10-19).
+W9="$TMP/c9"; mkdir -p "$W9"; mk_infra "$W9/live-infra.json"; mk_agent "$W9/live-agent.json"
+awk '/^### 8\.1/{f=1} f && /^```bash/{b=1; next} b && /^```/{exit} b' "$SKILL_MD" > "$W9/step8.sh"
+if [ ! -s "$W9/step8.sh" ]; then
+    bad "блок Шага 8 не найден в SKILL.md" "искал после «### 8.1» первый блок bash в $SKILL_MD"
+else
+    NAME=Оператор LANG=ru TIMEZONE=Asia/Almaty MANAGER=keepassxc PROJ_ID=alpha PROJ_INFRA_ROOT=C:/work/alpha \
+    SRV_ALIAS=SRV1 SRV_SSH=SRV1 SRV_ROLE=production PROJ_TITLE="Мой проект" \
+    BACKUPS_ENABLED=true BACKUPS_DESTINATION=sftp BACKUPS_RETENTION_JSON='{"daily":7,"weekly":4,"monthly":6}' \
+    BACKUPS_SFTP_HOST=backup-host BACKUPS_SFTP_PATH=/data/srv9 \
+    BRAIN_EXISTS=1 BRAIN_PATH="$W9/live-agent.json" INFRA_EXISTS=1 INFRA_CONFIG_PATH="$W9/live-infra.json" \
+    SYSADMIN_ROOT="$ROOT" WORKDIR="$W9" bash "$W9/step8.sh" >/dev/null 2>&1
+    echo "[дефект] вызов сборщика из Шага 8 SKILL.md — как написан"
+    if [ -f "$W9/infra-config-draft.json" ] && [ -f "$W9/agent-config-draft.json" ]; then
+        ok "блок Шага 8 отработал, оба draft'а собраны"
+        check "режим слияния дошёл: паспорт state цел"  '.state.mode=="rebuild"' "$W9/infra-config-draft.json"
+        check "путь приёмника без искажений"            '.backups.sftp.path=="/data/srv9"' "$W9/infra-config-draft.json"
+        check "реестр проектов из живого мозга цел"     '(.projects|length)==2' "$W9/agent-config-draft.json"
+    else
+        bad "блок Шага 8 отработал, оба draft'а собраны" "draft'ов нет — вызов из документа не запускается"
+    fi
+fi
+echo
+
+# ── Случай 10 [дефект]: защита пути закреплена по ТЕКСТУ сборщика (правило 3г) ─
+# На Linux/macOS MSYS нет, и поведенческие случаи 1, 7, 8 там зелёные и на сломанном
+# сборщике. Поэтому форма защиты проверяется ещё и шаблоном по тексту блока sftp.
+SFTP_BLOCK="$(sed -n '/# sftp-приёмник/,/^    fi$/p' "$ASM")"
+echo "[дефект] форма защиты пути в сборщике"
+if [ -z "$SFTP_BLOCK" ]; then
+    bad "блок sftp найден по маркерам" "нет текста между «# sftp-приёмник» и «    fi»"
+else
+    printf '%s' "$SFTP_BLOCK" | grep -qF "MSYS2_ARG_CONV_EXCL='*' jq" \
+        && ok "вызов jq идёт с MSYS2_ARG_CONV_EXCL='*'" \
+        || bad "вызов jq идёт с MSYS2_ARG_CONV_EXCL='*'" "в блоке sftp нет выключателя конверсии на jq"
+    printf '%s' "$SFTP_BLOCK" | grep -qF '< "$INFRA_DRAFT"' \
+        && ok "черновик подаётся через stdin" \
+        || bad "черновик подаётся через stdin" "без stdin выключатель сломал бы открытие файла"
+    printf '%s' "$SFTP_BLOCK" | grep -qF 'env._SFTP' \
+        && bad "нет передачи пути через окружение" "окружение портится: ANSI-кодировка, noemptyenvvalues" \
+        || ok "нет передачи пути через окружение"
 fi
 
 echo
