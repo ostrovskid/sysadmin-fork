@@ -119,7 +119,7 @@ README ждала 6,5 с). Сводка: секция [6] — медленный
 - ADR-0023 (сторож inventory): fail-open сохранён для «непонятно», для «не успел» — одна
   остановка.
 - Свод правил: `.claude/knowledge/agent-runtime/_reference/building-enforcement.md`,
-  правило 3е.
+  правило 3ж.
 - Код и тесты: `.claude/hooks/hook-timeout-watch.sh`, `.claude/hooks/tests/test-hook-timeout-watch.sh`,
   секции времени в `test-brain-update-check.sh` [10], `test-inventory-sync-guard.sh` [7],
   `test-retro-finding-gate.sh` [6].
