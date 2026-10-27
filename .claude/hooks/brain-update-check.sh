@@ -169,7 +169,7 @@ fi
 [ "$NEWER" -eq 1 ] || exit 0
 
 cat <<EOF
-[brain-update-check] Вышла новая версия мозга sysadmin: v$LATEST (установлена v$LOCAL; релизы берутся из remote «$REMOTE»).
+[brain-update-check] Вышла новая версия мозга sysadmin: v$LATEST (установлена v$LOCAL; релизы берутся из remote «${REMOTE}»).
 Cold Start, Шаг 5.5: сообщи оператору ОДНОЙ строкой в самом начале первого ответа, выше резюме —
 «Доступна новая версия sysadmin: v$LATEST (твоя — v$LOCAL). Скажи «обнови sysadmin» — покажу, что изменилось, и применю только после подтверждения; данные в infra/ не затрагиваются.»
 Сам не обновляй: применение — только по явной команде оператора, процедура — .claude/agents/references/cold-start.md, раздел «Когда оператор говорит «обнови sysadmin»».
