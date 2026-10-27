@@ -151,6 +151,114 @@ check deny  "windows-temp с обратными слешами наружу" \
 check allow 'штатная уборка через $TMPDIR'      'rm -rf "$TMPDIR/scratch"'
 check allow "штатная уборка windows-temp"       'rm -rf /c/users/op/appdata/local/temp/claude/p/s/scratchpad/x'
 
+echo "[1д] Ключи любой записью и знак конца ключей -- (разбор 19.10.2026)"
+# `rm -rf -- "$dir"` — штатная защитная запись (её же даёт образец ADR-0038), а шаблон
+# исключения ждал после ключей сразу путь: уборка своего временного с `--` уходила в
+# красную зону. Раздельные и длинные ключи — тот же случай.
+check allow "-- перед /tmp"                      'rm -rf -- /tmp/claude-scratch/x'
+check allow '-- перед $TMPDIR'                   'rm -rf -- "$TMPDIR/scratch"'
+check allow "-- и windows-temp с прямыми слешами" \
+  'rm -rf -- "C:/Users/operator/AppData/Local/Temp/claude/p/s/scratchpad/x"'
+check allow "проверка «это папка» и снос с --"   '[ -d "/tmp/x" ] && rm -rf -- "/tmp/x"'
+check allow "раздельные ключи во временном"      'rm -r -f /tmp/build'
+check allow "длинные ключи во временном"         'rm --recursive --force "$TMPDIR/build"'
+check allow "два временных пути"                 'rm -rf /tmp/a "$TMPDIR/b"'
+check allow "перенаправление ошибок — не путь"   'rm -rf /tmp/x 2>/dev/null'
+# Контроль: новая запись не открывает дорогу боевым путям.
+check deny  "-- не открывает боевой путь"        'rm -rf -- /opt/prod'
+check deny  "-- и выход вверх из временного"     'rm -rf -- /tmp/../opt/prod'
+check deny  "длинный ключ — не конец ключей"     'rm -rf --no-preserve-root /'
+
+echo "[1е] Исключение — только если ВСЕ пути временные (разбор 19.10.2026)"
+# Прежнее исключение смотрело на первый путь: команда, начатая со временного каталога,
+# уносила вторым путём домашний каталог или «Документы» — их нет в списке боевых.
+check deny  "временный + ~/Documents"            'rm -rf /tmp/x ~/Documents'
+check deny  'временный + $HOME'                  'rm -rf /tmp/x $HOME'
+check deny  '$TMPDIR + "$HOME"'                  'rm -rf "$TMPDIR/x" "$HOME"'
+check deny  "временный + документы windows"      'rm -rf /tmp/x "C:/Users/operator/Documents"'
+check deny  "windows-temp + msys-документы" \
+  'rm -rf /c/users/operator/appdata/local/temp/x /c/users/operator/documents'
+check deny  "-- + временный + домашний"          'rm -rf -- /tmp/x ~/Documents'
+check deny  "ключ после пути не прячет второй"   'rm -rf /tmp/x -- ~/Documents'
+check deny  "без пути: пути придут из stdin"     'xargs -0 rm -rf'
+check deny  "обёртка ssh: второй путь в кавычках" 'ssh host "rm -rf /tmp/x ~/data"'
+check allow "обёртка ssh: только временный путь"  'ssh host "rm -rf /tmp/x"'
+
+echo "[1з] Переменная временного каталога — только в надёжной форме (разбор 19.10.2026)"
+# Шаблон принимал любое `${TMPDIR…}`, в том числе с подстановкой чужого пути, и верил имени
+# переменной, даже если та же команда её переназначила.
+check deny  'подстановка по умолчанию — домашний'  'rm -rf "${TMPDIR:-$HOME}"'
+check deny  'подстановка «если задана» — домашний' 'rm -rf "${TEMP:+$HOME}"'
+check deny  'команда сама задаёт TMP'              'TMP=~; rm -rf "$TMP"'
+check deny  'export TMPDIR перед сносом'           'export TMPDIR=$HOME; rm -rf "$TMPDIR/x"'
+check deny  'read TMP перед сносом'                'read -r TMP < path.txt; rm -rf "$TMP"'
+check allow '${TMPDIR:?} — обрыв, если не задана'  'rm -rf "${TMPDIR:?}/x"'
+check allow '${TMPDIR} в скобках'                  'rm -rf "${TMPDIR}/x"'
+check allow 'mktemp рядом не лишает доверия'       'rm -rf "$TMPDIR/x"; d=$(mktemp -d)'
+
+echo "[1ж] Подстановка команды внутри «безопасного» сегмента (разбор 19.10.2026)"
+# Сегменты, начатые с read-only утилиты или git-текста, пропускались целиком — вместе с
+# `$(…)` и обратными кавычками, внутри которых исполняется что угодно.
+check deny  'echo $(…) с удалением внутри'       'echo $(rm -rf /opt/prod)'
+check deny  'cat + $(…) с удалением'             'cat notes.txt $(rm -rf /opt/prod)'
+check deny  'git commit -m "$(…)" с удалением'   'git commit -m "$(rm -rf /opt/prod)"'
+check deny  'обратные кавычки с удалением'       'echo `rm -rf /opt/prod`'
+check deny  'git rm без силы, но с подстановкой' 'git rm -r old $(rm -r /opt/prod)'
+# Контроль: безобидная подстановка и упоминание в тексте по-прежнему проходят.
+check allow 'echo "$(date)"'                     'echo "$(date)"'
+check allow 'grep с текстом rm -rf'              'grep -rn "rm -rf" scripts/'
+check allow 'коммит с упоминанием в тексте'      'git commit -m "docs: убран rm -rf из примера"'
+
+echo "[1и] Обходы, найденные красной командой (19.10.2026)"
+# Каждый запрещающий случай ниже на предыдущей версии замка проходил без фразы оператора
+# (вердикт снят прогоном); разрешающие «git grep с текстом» и «ветка на -f» там были
+# ложными блоками, остальные разрешающие — контрольные.
+check deny  'одиночный & прячет удаление за echo'   'echo start & rm -rf /opt/prod'
+check deny  'одиночный & и снос тома'               'echo ok & docker volume rm pgdata'
+check deny  'подстановка процесса <(…)'             'cat <(rm -rf /opt/prod)'
+check deny  'подстановка процесса >(…)'             'echo x > >(rm -rf /opt/prod)'
+check deny  'кавычки внутри имени: r"m"'            'r"m" -rf /opt/prod'
+check deny  'кавычки после имени: rm""'             'rm"" -rf /opt/prod'
+check deny  'обратная косая внутри имени: r\m'      'r\m -rf /opt/prod'
+check deny  'перенос строки перед ключами'          $'rm \\\n-rf /opt/prod'
+check deny  'имя команды в переменной'              'X=rm; $X -rf /opt/prod'
+check deny  'имя команды в переменной через eval'   'C=rm; eval "$C -rf /opt/prod"'
+check deny  'find -exec rm без -r'                  'find /opt/prod -type f -exec rm {} +'
+check deny  'find -delete'                          'find /opt/prod -delete'
+check deny  'xargs rm'                              'find /opt -name x -print0 | xargs -0 rm'
+check deny  'перенаправление в чужой файл, слитно'  'rm -rf /tmp/x >~/.bashrc'
+check deny  'перенаправление в чужой файл, через пробел' 'rm -rf /tmp/x > ~/.bashrc'
+check deny  'подстановка внутри ${TMPDIR:?…}'       'rm -rf "${TMPDIR:?$(rm -rf ~/Documents)}"'
+check deny  'force через «+» перед веткой'          'git push origin +main'
+check deny  'force склейкой ключей'                  'git push -uf origin main'
+# Контроль: безобидное по-прежнему проходит.
+check allow 'git grep с текстом rm -rf'             'git grep -n "rm -rf" HEAD'
+check allow 'ветка на -f — не ключ силы'            'git push origin release-f'
+check allow 'обычный push с -u'                     'git push -u origin feature'
+check allow 'уборка временного с 2>&1'              'rm -rf /tmp/x 2>&1'
+check allow 'уборка временного с 2> /dev/null'      'rm -rf /tmp/x 2> /dev/null'
+check allow 'уборка временного с журналом во временном' 'rm -rf /tmp/x >/tmp/x.log'
+check allow 'адрес с & в кавычках'                  'curl -s "https://example.com/?a=1&b=2"'
+check allow 'фоновая команда'                       'sleep 1 & wait'
+check allow 'diff двух подстановок без удаления'    'diff <(sort a.txt) <(sort b.txt)'
+
+echo "[2а] Рекурсивное удаление в любой записи ключей (разбор 19.10.2026)"
+# Шаблон ловил только склеенные -rf/-fr: раздельные, длинные ключи и -r без -f проходили.
+check deny  "раздельные ключи -r -f"             'rm -r -f /opt/prod'
+check deny  "заглавная -R -f"                    'rm -R -f /opt/prod'
+check deny  "длинные --recursive --force"        'rm --recursive --force /opt/prod'
+check deny  "-r без -f — тоже необратимо"        'rm -r /opt/prod'
+check deny  "-f раньше -r"                       'rm -f -r /opt/prod'
+check deny  "внутри ssh"                         'ssh host "rm -r /opt/apps/site"'
+check deny  "через find -exec"                   'find /opt -name x -exec rm -r {} +'
+check deny  "git rm с ключом силы раздельно"     'git rm -r -f old-dir'
+check deny  "git rm -rf — как раньше"            'git rm -rf old-dir'
+# Контроль: не-рекурсивное и обратимое не задето.
+check allow "rm файла без -r"                    'rm -f /tmp/report.json'
+check allow "слово с rm внутри — не команда"     'confirm -r /opt/prod'
+check allow "git rm -r --cached — только индекс" 'git rm -r --cached old-dir'
+check allow "git rm -r без силы — вернёт checkout" 'git rm -r old-dir'
+
 echo "[2] Красная зона без подтверждения блокируется"
 check deny "rm -rf на боевом пути"          'rm -rf /opt/academii/data'
 check deny "rm -fr (переставленные флаги)"  'rm -fr /var/lib/postgresql'
@@ -288,6 +396,12 @@ for re in "${RED_PATTERNS[@]}" \
           "$(grep -Eo "^SAFE_RM_RE='[^']+'" "$HOOK" | sed "s/^SAFE_RM_RE='//; s/'\$//")"; do
   [[ "probe" =~ $re ]]; [ $? -eq 2 ] && broken="${broken} ${re}"
 done
+# Шаблоны разбора исключения по словам (19.10.2026) — та же проверка сборки.
+for name in TOKEN_RE REDIR_RE SAFE_REDIR_RE TEMP_PATH_RE TMPVAR_WORD_RE GIT_RM_LEAD FORCE_OPT_RE SUBST_RE RM_VAR_RE; do
+  re="$(grep -Eo "^${name}='[^']+'" "$HOOK" | sed "s/^${name}='//; s/'\$//")"
+  [ -z "$re" ] && continue
+  [[ "probe" =~ $re ]]; [ $? -eq 2 ] && broken="${broken} ${name}"
+done
 if [ "${#RED_PATTERNS[@]}" -lt 5 ]; then bad "правил прочитано подозрительно мало: ${#RED_PATTERNS[@]}"
 elif [ -n "$broken" ]; then bad "не компилируются в bash =~:${broken}"
 else ok "все ${#RED_PATTERNS[@]} правил и исключение компилируются в bash =~"; fi
@@ -361,7 +475,7 @@ done
 # Переносимость сторожа (правило 3г: поведение зависит от версии bash — ловится текстом). На
 # системном bash macOS (3.2) `$!` после `<( )` не задан, и под `set -u` голое `$!` обрывает
 # замок без вывода — то есть «разрешаю»; код `read -t` по таймауту (>128) bash отличает от
-# конца данных только с 4.0. Первая версия сторожа (6c19fbd) на оба наступила.
+# конца данных только с 4.0. Первая версия сторожа, до отправки в эту заявку, на оба наступила.
 STRAZH="$(sed -n '/^# ── Сторож времени/,$p' "$HOOK" | grep -v '^[[:space:]]*#')"
 if [ -z "$STRAZH" ]; then
   bad "сторож времени не найден по маркеру — проверять нечего"
