@@ -1,6 +1,19 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "g=\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/hook-timeout-watch.sh\"; if [ -f \"$g\" ]; then bash \"$g\"; else cat >/dev/null; fi",
+            "timeout": 20,
+            "statusMessage": "Раз в неделю: не прерывались ли замки по таймауту…"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -33,18 +46,6 @@
             "command": "g=\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/inventory-sync-guard.sh\"; if [ -f \"$g\" ]; then bash \"$g\"; else cat >/dev/null; fi",
             "timeout": 20,
             "statusMessage": "Сверяю inventory с изменениями…"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "g=\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/hook-timeout-watch.sh\"; if [ -f \"$g\" ]; then bash \"$g\"; else cat >/dev/null; fi",
-            "timeout": 20,
-            "statusMessage": "Раз в неделю: не прерывались ли замки по таймауту…"
           }
         ]
       }
